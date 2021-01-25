@@ -3492,15 +3492,6 @@ function checkMode (stat, options) {
 
 "use strict";
 
-var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
-    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
-    return new (P || (P = Promise))(function (resolve, reject) {
-        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
-        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
-        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
-        step((generator = generator.apply(thisArg, _arguments || [])).next());
-    });
-};
 var __importStar = (this && this.__importStar) || function (mod) {
     if (mod && mod.__esModule) return mod;
     var result = {};
@@ -3511,32 +3502,66 @@ var __importStar = (this && this.__importStar) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const core = __importStar(__webpack_require__(470));
 const github_1 = __webpack_require__(469);
-function run() {
-    return __awaiter(this, void 0, void 0, function* () {
-        try {
-            const GITHUB_TOKEN = core.getInput('githubToken');
-            const projectId = core.getInput('projectId');
-            const gitHub = new github_1.GitHub(GITHUB_TOKEN);
-            const pr = github_1.context.payload.pull_request;
-            if (!pr) {
-                core.setFailed('This is not a PR');
-                return;
-            }
-            const mutation = `
-      mutation AddProject($prId: ID!, $projectId: ID!) {
+async function run() {
+    try {
+        const GITHUB_TOKEN = core.getInput('githubToken');
+        const projectId = core.getInput('projectId');
+        const gitHub = new github_1.GitHub(GITHUB_TOKEN);
+        const pr = github_1.context.payload.pull_request;
+        if (!pr) {
+            core.setFailed('This is not a PR');
+            return;
+        }
+        const projectIds = Array.from([
+            projectId,
+            ...(await getExistingProjectIds(gitHub, pr.node_id))
+        ]);
+        const mutation = `
+      mutation AddProject($prId: ID!, $projectIds: [ID!]!) {
         updatePullRequest(
-          input: {pullRequestId: $prId, projectIds: [$projectId]}
+          input: {pullRequestId: $prId, projectIds: $projectIds}
         ) {
           clientMutationId
         }
       }
     `;
-            yield gitHub.graphql(mutation, { prId: pr.node_id, projectId });
+        await gitHub.graphql(mutation, { prId: pr.node_id, projectIds });
+    }
+    catch (error) {
+        core.setFailed(error.message);
+    }
+}
+async function getExistingProjectIds(gitHub, prId) {
+    var _a;
+    const pullRequestQuery = `
+      query GetProjects($prId: ID!) {
+        nodes(ids: [$prId]) {
+          ... on PullRequest {
+            id
+            projectCards {
+              nodes {
+                project {
+                  id
+                }
+              }
+            }
+          }
         }
-        catch (error) {
-            core.setFailed(error.message);
+      }
+    `;
+    const result = await gitHub.graphql(pullRequestQuery, { prId });
+    const projects = new Set();
+    for (const node of result.nodes) {
+        const cards = node.projectCards.nodes;
+        if (cards == null)
+            break;
+        for (const card of cards) {
+            const existingProjectId = (_a = card) === null || _a === void 0 ? void 0 : _a.project.id;
+            if (existingProjectId != null)
+                projects.add(existingProjectId);
         }
-    });
+    }
+    return projects;
 }
 run();
 
@@ -4944,6 +4969,12 @@ function convertBody(buffer, headers) {
 	// html4
 	if (!res && str) {
 		res = /<meta[\s]+?http-equiv=(['"])content-type\1[\s]+?content=(['"])(.+?)\2/i.exec(str);
+		if (!res) {
+			res = /<meta[\s]+?content=(['"])(.+?)\1[\s]+?http-equiv=(['"])content-type\3/i.exec(str);
+			if (res) {
+				res.pop(); // drop last quote
+			}
+		}
 
 		if (res) {
 			res = /charset=(.*)/i.exec(res.pop());
@@ -5951,7 +5982,7 @@ function fetch(url, opts) {
 				// HTTP fetch step 5.5
 				switch (request.redirect) {
 					case 'error':
-						reject(new FetchError(`redirect mode is set to error: ${request.url}`, 'no-redirect'));
+						reject(new FetchError(`uri requested responds with a redirect, redirect mode is set to error: ${request.url}`, 'no-redirect'));
 						finalize();
 						return;
 					case 'manual':
@@ -5990,7 +6021,8 @@ function fetch(url, opts) {
 							method: request.method,
 							body: request.body,
 							signal: request.signal,
-							timeout: request.timeout
+							timeout: request.timeout,
+							size: request.size
 						};
 
 						// HTTP-redirect fetch step 9
